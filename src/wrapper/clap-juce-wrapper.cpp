@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
+#include <cstring>
 #include <new>
 
 #define JUCE_GUI_BASICS_INCLUDE_XHEADERS 1
@@ -57,6 +58,154 @@ JUCE_END_IGNORE_WARNINGS_MSVC
 JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
 #include <clap-juce-extensions/clap-juce-extensions.h>
+
+#if __has_include(<mouseplugins/mastino60a/plugin/Mastino60aClapSidechainTopology.h>)
+    #include <mouseplugins/mastino60a/plugin/Mastino60aClapSidechainTopology.h>
+    #define MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY 1
+#else
+    #define MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY 0
+#endif
+
+#if __has_include(<mouseplugins/mastino60a/plugin/Mastino60aProcessor.h>)
+    #include <mouseplugins/mastino60a/plugin/Mastino60aProcessor.h>
+    #define MOUSEPLUGINS_HAVE_MASTINO60A_PROCESSOR 1
+#else
+    #define MOUSEPLUGINS_HAVE_MASTINO60A_PROCESSOR 0
+#endif
+
+namespace
+{
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+using mouseplugins::mastino60a::plugin::claptopology::AudioPortInfo;
+using mouseplugins::mastino60a::plugin::claptopology::AudioPortsConfig;
+using mouseplugins::mastino60a::plugin::claptopology::PortType;
+namespace mastino_clap_topology = mouseplugins::mastino60a::plugin::claptopology;
+
+  #if MOUSEPLUGINS_HAVE_MASTINO60A_PROCESSOR
+[[nodiscard]] mouseplugins::mastino60a::plugin::Mastino60aProcessor*
+getMastino60AProcessor(juce::AudioProcessor* processor) noexcept
+{
+    return dynamic_cast<mouseplugins::mastino60a::plugin::Mastino60aProcessor*>(processor);
+}
+
+  #else
+[[nodiscard]] juce::AudioProcessor* getMastino60AProcessor(juce::AudioProcessor* processor) noexcept
+{
+    juce::ignoreUnused(processor);
+    return nullptr;
+}
+  #endif
+
+[[nodiscard]] const char* toClapPortType(PortType portType) noexcept
+{
+    switch (portType)
+    {
+        case PortType::mono:   return CLAP_PORT_MONO;
+        case PortType::stereo: return CLAP_PORT_STEREO;
+    }
+
+    return nullptr;
+}
+
+[[nodiscard]] std::uint32_t toClapAudioPortFlags(std::uint32_t flags) noexcept
+{
+    std::uint32_t result = 0u;
+
+    if ((flags & mastino_clap_topology::kFlagIsMain) != 0u)
+        result |= CLAP_AUDIO_PORT_IS_MAIN;
+    if ((flags & mastino_clap_topology::kFlagSupports64Bit) != 0u)
+        result |= CLAP_AUDIO_PORT_SUPPORTS_64BITS;
+    if ((flags & mastino_clap_topology::kFlagPrefers64Bit) != 0u)
+        result |= CLAP_AUDIO_PORT_PREFERS_64BITS;
+    if ((flags & mastino_clap_topology::kFlagRequiresCommonSampleSize) != 0u)
+        result |= CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE;
+
+    return result;
+}
+
+void copyClapName(char* dest, std::size_t capacity, const char* source) noexcept
+{
+    std::strncpy(dest, source, capacity);
+    dest[capacity - 1u] = '\0';
+}
+
+[[nodiscard]] bool fillMastinoAudioPortsConfig(clap_audio_ports_config_t* config) noexcept
+{
+    if (config == nullptr)
+        return false;
+
+    AudioPortsConfig topology {};
+    if (!mastino_clap_topology::getAudioPortsConfig(0u, topology))
+        return false;
+
+    config->id = static_cast<clap_id>(topology.id);
+    copyClapName(config->name, sizeof(config->name), topology.name);
+    config->input_port_count = topology.inputPortCount;
+    config->output_port_count = topology.outputPortCount;
+    config->has_main_input = topology.hasMainInput;
+    config->main_input_channel_count = topology.mainInputChannelCount;
+    config->main_input_port_type = toClapPortType(topology.mainInputPortType);
+    config->has_main_output = topology.hasMainOutput;
+    config->main_output_channel_count = topology.mainOutputChannelCount;
+    config->main_output_port_type = toClapPortType(topology.mainOutputPortType);
+    return true;
+}
+
+[[nodiscard]] bool fillMastinoAudioPortInfo(clap_id configId,
+                                            std::uint32_t portIndex,
+                                            bool isInput,
+                                            clap_audio_port_info_t* info) noexcept
+{
+    if (info == nullptr)
+        return false;
+
+    AudioPortInfo topology {};
+    if (!mastino_clap_topology::getAudioPortsConfigInfo(static_cast<std::uint32_t>(configId),
+                                                        portIndex,
+                                                        isInput,
+                                                        topology))
+    {
+        return false;
+    }
+
+    info->id = static_cast<clap_id>(topology.id);
+    copyClapName(info->name, sizeof(info->name), topology.name);
+    info->flags = toClapAudioPortFlags(topology.flags);
+    info->channel_count = topology.channelCount;
+    info->port_type = toClapPortType(topology.portType);
+    info->in_place_pair = (topology.inPlacePair == mastino_clap_topology::kInvalidPortId)
+                        ? CLAP_INVALID_ID
+                        : static_cast<clap_id>(topology.inPlacePair);
+    return true;
+}
+
+[[nodiscard]] bool setMastinoAudioPortActiveState(juce::AudioProcessor* processor,
+                                                  bool isInput,
+                                                  std::uint32_t portIndex,
+                                                  bool isActive) noexcept
+{
+#if MOUSEPLUGINS_HAVE_MASTINO60A_PROCESSOR
+    auto* mastinoProcessor = getMastino60AProcessor(processor);
+    if (mastinoProcessor == nullptr)
+        return false;
+
+    if (!mastino_clap_topology::isValidAudioPortActivationTarget(portIndex, isInput))
+        return false;
+
+    if (!isInput)
+        return portIndex == 0u;
+
+    if (portIndex == 0u)
+        return isActive;
+
+    return mastinoProcessor->setExternalSidechainBusEnabled(isActive);
+#else
+    juce::ignoreUnused(processor, isInput, portIndex, isActive);
+    return false;
+#endif
+}
+#endif
+} // namespace
 
 #if JUCE_LINUX
 #if JUCE_VERSION >= 0x070006
@@ -972,6 +1121,26 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
     }
 
   public:
+    const void* extension(const char* id) noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        if (supportsMastinoAudioPortsConfig()
+            && (! std::strcmp(id, CLAP_EXT_AUDIO_PORTS_CONFIG_INFO)
+                || ! std::strcmp(id, CLAP_EXT_AUDIO_PORTS_CONFIG_INFO_COMPAT)))
+        {
+            static const clap_plugin_audio_ports_config_info extensionInfo {
+                clapAudioPortsCurrentConfig,
+                clapAudioPortsConfigInfoGet,
+            };
+            return &extensionInfo;
+        }
+
+#else
+        juce::ignoreUnused(id);
+#endif
+        return nullptr;
+    }
+
     bool implementsAudioPorts() const noexcept override { return true; }
     uint32_t audioPortsCount(bool isInput) const noexcept override
     {
@@ -1038,17 +1207,139 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
         return true;
     }
+    bool implementsAudioPortsConfig() const noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        return supportsMastinoAudioPortsConfig();
+#else
+        return false;
+#endif
+    }
     uint32_t audioPortsConfigCount() const noexcept override
     {
-        DBG("audioPortsConfigCount CALLED - returning 0");
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        if (supportsMastinoAudioPortsConfig())
+            return mastino_clap_topology::getAudioPortsConfigCount();
+#endif
         return 0;
     }
-    bool audioPortsGetConfig(uint32_t /*index*/,
-                             clap_audio_ports_config * /*config*/) const noexcept override
+    bool audioPortsGetConfig(uint32_t index,
+                             clap_audio_ports_config *config) const noexcept override
     {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        if (supportsMastinoAudioPortsConfig())
+        {
+            if (index != 0u)
+                return false;
+
+            return fillMastinoAudioPortsConfig(config);
+        }
+#else
+        juce::ignoreUnused(index, config);
+#endif
         return false;
     }
-    bool audioPortsSetConfig(clap_id /*configId*/) noexcept override { return false; }
+    bool audioPortsSetConfig(clap_id configId) noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        if (supportsMastinoAudioPortsConfig())
+        {
+            if (!mastino_clap_topology::isSupportedAudioPortsConfigId(
+                    static_cast<std::uint32_t>(configId)))
+            {
+                return false;
+            }
+
+            return mastino_clap_topology::canSelectAudioPortsConfig(isActive());
+        }
+#else
+        juce::ignoreUnused(configId);
+#endif
+        return false;
+    }
+
+    bool implementsAudioPortsActivation() const noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        return supportsMastinoAudioPortsConfig()
+            && mastino_clap_topology::supportsAudioPortsActivationExtension();
+#else
+        return false;
+#endif
+    }
+
+    bool audioPortsActivationCanActivateWhileProcessing() const noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        if (supportsMastinoAudioPortsConfig())
+            return mastino_clap_topology::canActivateAudioPortsWhileProcessing();
+#endif
+        return false;
+    }
+
+    bool audioPortsActivationSetActive(bool isInput,
+                                       uint32_t portIndex,
+                                       bool shouldBeActive,
+                                       uint32_t sampleSize) noexcept override
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        juce::ignoreUnused(sampleSize);
+        if (!supportsMastinoAudioPortsConfig())
+            return false;
+
+        if (!mastino_clap_topology::canSetAudioPortActivation(isActive(), portIndex, isInput))
+            return false;
+
+        return setMastinoAudioPortActiveState(processor.get(), isInput, portIndex, shouldBeActive);
+#else
+        juce::ignoreUnused(isInput, portIndex, shouldBeActive, sampleSize);
+        return false;
+#endif
+    }
+
+  private:
+    [[nodiscard]] bool supportsMastinoAudioPortsConfig() const noexcept
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        return getMastino60AProcessor(processor.get()) != nullptr;
+#else
+        return false;
+#endif
+    }
+
+    static clap_id clapAudioPortsCurrentConfig(const clap_plugin_t* plugin) noexcept
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        auto* wrapper = static_cast<ClapJuceWrapper*>(plugin->plugin_data);
+        if (wrapper == nullptr || !wrapper->supportsMastinoAudioPortsConfig())
+            return CLAP_INVALID_ID;
+
+        return static_cast<clap_id>(mastino_clap_topology::getCurrentAudioPortsConfigId());
+#else
+        juce::ignoreUnused(plugin);
+        return CLAP_INVALID_ID;
+#endif
+    }
+
+    static bool clapAudioPortsConfigInfoGet(const clap_plugin_t* plugin,
+                                            clap_id configId,
+                                            uint32_t portIndex,
+                                            bool isInput,
+                                            clap_audio_port_info_t* info) noexcept
+    {
+#if MOUSEPLUGINS_HAVE_MASTINO60A_CLAP_TOPOLOGY
+        auto* wrapper = static_cast<ClapJuceWrapper*>(plugin->plugin_data);
+        if (wrapper == nullptr || !wrapper->supportsMastinoAudioPortsConfig())
+            return false;
+
+        return fillMastinoAudioPortInfo(configId, portIndex, isInput, info);
+#else
+        juce::ignoreUnused(plugin, configId, portIndex, isInput, info);
+        return false;
+#endif
+    }
+
+  public:
 
     bool implementsNotePorts() const noexcept override { return true; }
     uint32_t notePortsCount(bool is_input) const noexcept override
